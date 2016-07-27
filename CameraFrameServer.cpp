@@ -65,7 +65,7 @@ int main(int argc, char* argv[])
   ThreadData td;
   cv::VideoCapture cap;
   cap.open(0);
-  CalculateFrameRate(cap);
+  //CalculateFrameRate(cap);
   cap.release();
   while(1){
     //------------------------------------------------------------
@@ -239,56 +239,54 @@ void* ThreadFunction(void* ptr)
   // NOTE: TrackingDataElement class instances are allocated
   //       before the loop starts to avoid reallocation
   //       in each image transfer.
-  x264_param_t* param;
-  cli_opt_t* opt;
+  x264_param_t param;
+  x264_param_default_preset( &param, "medium", NULL );
+  cli_opt_t opt;
   x264_t *h = NULL;
-  h = x264_encoder_open( param );
+  int picWidth = 1024, picHeight = 720;
+  param.i_csp = X264_CSP_BGR;
+  param.i_width  = picWidth;
+  param.i_height = picHeight;
+  param.b_vfr_input = 0;
+  param.b_repeat_headers = 1;
+  param.b_annexb = 1;
+  h = x264_encoder_open( &param );
   if (h != NULL)
   {
     int argc = 2;
     char *argv[2] = {"--qp 0","--crf 24"};
     x264_picture_t pic;
-    cli_pic_t cli_pic;
-    x264_picture_clean(&pic);
-    int picWidth = 1024, picHeight = 720;
     x264_picture_alloc(&pic, X264_CSP_BGR, picWidth, picHeight);
     pic.img.i_plane = 3;
+    pic.img.i_stride[0] = pic.img.i_stride[1] = pic.img.i_stride[2] = picWidth;
     const cli_pulldown_t *pulldown = NULL; // shut up gcc
     
     int     i_frame = 0;
-    int     i_frame_output = 0;
-    int64_t i_end, i_previous = 0, i_start = 0;
-    int64_t i_file = 0;
-    int     i_frame_size;
     int64_t last_dts = 0;
-    int64_t prev_dts = 0;
-    int64_t first_dts = 0;
 #   define  MAX_PTS_WARNING 3 /* arbitrary */
     int     pts_warning_cnt = 0;
     int64_t largest_pts = -1;
     int64_t second_largest_pts = -1;
     int64_t ticks_per_frame;
-    double  duration;
     double  pulldown_pts = 0;
-    int     retval = 0;
     
-    opt->b_progress &= param->i_log_level < X264_LOG_DEBUG;
+    opt.b_progress &= param.i_log_level < X264_LOG_DEBUG;
     
     /* set up pulldown */
-    if( opt->i_pulldown && !param->b_vfr_input )
+    if( opt.i_pulldown && !param.b_vfr_input )
     {
-      param->b_pulldown = 1;
-      param->b_pic_struct = 1;
-      pulldown = &pulldown_values[opt->i_pulldown];
-      param->i_timebase_num = param->i_fps_den;
-      param->i_timebase_den = param->i_fps_num * pulldown->fps_factor;
+      param.b_pulldown = 1;
+      param.b_pic_struct = 1;
+      pulldown = &pulldown_values[opt.i_pulldown];
+      param.i_timebase_num = param.i_fps_den;
+      param.i_timebase_den = param.i_fps_num * pulldown->fps_factor;
     }
 
-    parse( argc, argv, param, opt ) ;
-    x264_encoder_parameters( h, param );
+    parse( argc, argv, &param, &opt ) ;
+    x264_encoder_parameters( h, &param );
     
     /* ticks/frame = ticks/second / frames/second */
-    ticks_per_frame = (int64_t)param->i_timebase_den * param->i_fps_den / param->i_timebase_num / param->i_fps_num;
+    ticks_per_frame = (int64_t)param.i_timebase_den * param.i_fps_den / param.i_timebase_num / param.i_fps_num;
     ticks_per_frame = X264_MAX( ticks_per_frame, 1 );
     
     if (td->cap.isOpened())
@@ -328,21 +326,20 @@ void* ThreadFunction(void* ptr)
         }
         else{
           pic.i_pts = i_frame;
-          pic.img.i_stride[0] = pic.img.i_stride[1] = pic.img.i_stride[2] = picWidth;
           pic.img.plane[0] = frame.data;
           pic.img.plane[1] = pic.img.plane[0] + picWidth*picHeight;
           pic.img.plane[2] = pic.img.plane[1] + picWidth*picHeight;
-          if( !param->b_vfr_input )
+          if( !param.b_vfr_input )
             pic.i_pts = i_frame;
           
-          if( opt->i_pulldown && !param->b_vfr_input )
+          if( opt.i_pulldown && !param.b_vfr_input )
           {
             pic.i_pic_struct = pulldown->pattern[ i_frame % pulldown->mod ];
             pic.i_pts = (int64_t)( pulldown_pts + 0.5 );
             pulldown_pts += pulldown_frame_duration[pic.i_pic_struct];
           }
-          else if( opt->timebase_convert_multiplier )
-            pic.i_pts = (int64_t)( pic.i_pts * opt->timebase_convert_multiplier + 0.5 );
+          else if( opt.timebase_convert_multiplier )
+            pic.i_pts = (int64_t)( pic.i_pts * opt.timebase_convert_multiplier + 0.5 );
           
           if( pic.i_pts <= largest_pts )
           {
@@ -357,8 +354,8 @@ void* ThreadFunction(void* ptr)
           
           second_largest_pts = largest_pts;
           largest_pts = pic.i_pts;
-          if( opt->qpfile )
-            parse_qpfile( opt, &pic, i_frame + opt->i_seek );
+          if( opt.qpfile )
+            parse_qpfile( &opt, &pic, i_frame + opt.i_seek );
           
           x264_picture_t pic_out;
           x264_nal_t *nal;
@@ -397,8 +394,8 @@ void* ThreadFunction(void* ptr)
         }
       }
     }
+    x264_encoder_close( h );
   }
-  x264_encoder_close( h );
   return NULL;
 }
 
