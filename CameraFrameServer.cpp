@@ -66,7 +66,19 @@ int main(int argc, char* argv[])
   cv::VideoCapture cap;
   cap.open(0);
   //CalculateFrameRate(cap);
-  cap.release();
+  //Test the encoder
+  td.interval = 1;
+  td.glock    = glock;
+  td.socket   = NULL;
+  td.stop     = 0;
+  td.cap = cap;
+  td.useCompression = 1;
+  threader->SpawnThread((igtl::ThreadFunctionType) &ThreadFunction, &td);
+  while(1);
+  {
+    sleep(10000);
+  }
+  
   while(1){
     //------------------------------------------------------------
     // Waiting for Connection
@@ -239,26 +251,32 @@ void* ThreadFunction(void* ptr)
   // NOTE: TrackingDataElement class instances are allocated
   //       before the loop starts to avoid reallocation
   //       in each image transfer.
+  int picWidth = 1024, picHeight = 720;
   x264_param_t param;
+  x264_picture_t pic;
+  x264_picture_alloc(&pic, X264_CSP_BGR, picWidth, picHeight);
+  x264_picture_t pic_out;
+  x264_nal_t *nal;
+  int i_nal;
   x264_param_default_preset( &param, "medium", NULL );
   cli_opt_t opt;
   x264_t *h = NULL;
-  int picWidth = 1024, picHeight = 720;
+  
   param.i_csp = X264_CSP_BGR;
   param.i_width  = picWidth;
   param.i_height = picHeight;
   param.b_vfr_input = 0;
   param.b_repeat_headers = 1;
   param.b_annexb = 1;
+  x264_param_apply_profile( &param, "high444" );
   h = x264_encoder_open( &param );
   if (h != NULL)
   {
     int argc = 2;
-    char *argv[2] = {"--qp 0","--crf 24"};
-    x264_picture_t pic;
-    x264_picture_alloc(&pic, X264_CSP_BGR, picWidth, picHeight);
-    pic.img.i_plane = 3;
-    pic.img.i_stride[0] = pic.img.i_stride[1] = pic.img.i_stride[2] = picWidth;
+    char *argv[2] = {"--qp=0","--crf=24"};
+    
+    //pic.img.i_plane = 3;
+    //pic.img.i_stride[0] = pic.img.i_stride[1] = pic.img.i_stride[2] = picWidth;
     const cli_pulldown_t *pulldown = NULL; // shut up gcc
     
     int     i_frame = 0;
@@ -283,6 +301,7 @@ void* ThreadFunction(void* ptr)
     }
 
     parse( argc, argv, &param, &opt ) ;
+    
     x264_encoder_parameters( h, &param );
     
     /* ticks/frame = ticks/second / frames/second */
@@ -341,29 +360,13 @@ void* ThreadFunction(void* ptr)
           else if( opt.timebase_convert_multiplier )
             pic.i_pts = (int64_t)( pic.i_pts * opt.timebase_convert_multiplier + 0.5 );
           
-          if( pic.i_pts <= largest_pts )
-          {
-            if( cli_log_level >= X264_LOG_DEBUG || pts_warning_cnt < MAX_PTS_WARNING )
-              x264_cli_log( "x264", X264_LOG_WARNING, "non-strictly-monotonic pts at frame %d (%"PRId64" <= %"PRId64")\n",
-                           i_frame, pic.i_pts, largest_pts );
-            else if( pts_warning_cnt == MAX_PTS_WARNING )
-              x264_cli_log( "x264", X264_LOG_WARNING, "too many nonmonotonic pts warnings, suppressing further ones\n" );
-            pts_warning_cnt++;
-            pic.i_pts = largest_pts + ticks_per_frame;
-          }
-          
-          second_largest_pts = largest_pts;
-          largest_pts = pic.i_pts;
           if( opt.qpfile )
             parse_qpfile( &opt, &pic, i_frame + opt.i_seek );
           
-          x264_picture_t pic_out;
-          x264_nal_t *nal;
-          int i_nal;
+          
           int i_frame_size = 0;
           i_frame_size = x264_encoder_encode( h, &nal, &i_nal, &pic, &pic_out );
           
-          if( i_frame_size )
           i_frame++;
           if(i_frame_size > 0)
           {

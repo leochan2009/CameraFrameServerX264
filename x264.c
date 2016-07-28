@@ -38,14 +38,12 @@
 #endif
 
 #include <signal.h>
-#define _GNU_SOURCE
 #include <getopt.h>
 #include "common/common.h"
 #include "x264cli.h"
 #include "input/input.h"
 #include "output/output.h"
 #include "filters/filters.h"
-#include "filters/video/video.h"
 
 #define FAIL_IF_ERROR( cond, ... ) FAIL_IF_ERR( cond, "x264", __VA_ARGS__ )
 
@@ -154,6 +152,7 @@ typedef struct {
     hnd_t hin;
     hnd_t hout;
     FILE *qpfile;
+    FILE *tcfile_out;
     double timebase_convert_multiplier;
     int i_pulldown;
 } cli_opt_t;
@@ -350,6 +349,58 @@ static void print_version_info( void )
 #endif
 }
 
+int main( int argc, char **argv )
+{
+    x264_param_t param;
+    cli_opt_t opt = {0};
+    int ret = 0;
+
+    FAIL_IF_ERROR( x264_threading_init(), "unable to initialize threading\n" )
+
+#ifdef _WIN32
+    FAIL_IF_ERROR( !get_argv_utf8( &argc, &argv ), "unable to convert command line to UTF-8\n" )
+
+    GetConsoleTitleW( org_console_title, CONSOLE_TITLE_SIZE );
+    _setmode( _fileno( stdin ),  _O_BINARY );
+    _setmode( _fileno( stdout ), _O_BINARY );
+    _setmode( _fileno( stderr ), _O_BINARY );
+#endif
+
+    /* Parse command line */
+    if( parse( argc, argv, &param, &opt ) < 0 )
+        ret = -1;
+
+#ifdef _WIN32
+    /* Restore title; it can be changed by input modules */
+    SetConsoleTitleW( org_console_title );
+#endif
+
+    /* Control-C handler */
+    signal( SIGINT, sigint_handler );
+
+    if( !ret )
+        ret = encode( &param, &opt );
+
+    /* clean up handles */
+    if( filter.free )
+        filter.free( opt.hin );
+    else if( opt.hin )
+        cli_input.close_file( opt.hin );
+    if( opt.hout )
+        cli_output.close_file( opt.hout, 0, 0 );
+    if( opt.tcfile_out )
+        fclose( opt.tcfile_out );
+    if( opt.qpfile )
+        fclose( opt.qpfile );
+
+#ifdef _WIN32
+    SetConsoleTitleW( org_console_title );
+    free( argv );
+#endif
+
+    return ret;
+}
+
 static char const *strtable_lookup( const char * const table[], int idx )
 {
     int i = 0; while( table[i] ) i++;
@@ -369,57 +420,51 @@ static char *stringify_names( char *buf, const char * const names[] )
     return buf;
 }
 
-
-
-int main( int argc, char **argv )
+static void print_csp_names( int longhelp )
 {
-  x264_param_t param;
-  cli_opt_t opt = {0};
-  int ret = 0;
-  
-  FAIL_IF_ERROR( x264_threading_init(), "unable to initialize threading\n" )
-  
-#ifdef _WIN32
-  FAIL_IF_ERROR( !get_argv_utf8( &argc, &argv ), "unable to convert command line to UTF-8\n" )
-  
-  GetConsoleTitleW( org_console_title, CONSOLE_TITLE_SIZE );
-  _setmode( _fileno( stdin ),  _O_BINARY );
-  _setmode( _fileno( stdout ), _O_BINARY );
-  _setmode( _fileno( stderr ), _O_BINARY );
+    if( longhelp < 2 )
+        return;
+#   define INDENT "                                "
+    printf( "                              - valid csps for `raw' demuxer:\n" );
+    printf( INDENT );
+    for( int i = X264_CSP_NONE+1; i < X264_CSP_CLI_MAX; i++ )
+    {
+        if( x264_cli_csps[i].name )
+        {
+            printf( "%s", x264_cli_csps[i].name );
+            if( i+1 < X264_CSP_CLI_MAX )
+                printf( ", " );
+        }
+    }
+#if HAVE_LAVF
+    printf( "\n" );
+    printf( "                              - valid csps for `lavf' demuxer:\n" );
+    printf( INDENT );
+    size_t line_len = strlen( INDENT );
+    for( enum AVPixelFormat i = AV_PIX_FMT_NONE+1; i < AV_PIX_FMT_NB; i++ )
+    {
+        const char *pfname = av_get_pix_fmt_name( i );
+        if( pfname )
+        {
+            size_t name_len = strlen( pfname );
+            if( line_len + name_len > (80 - strlen( ", " )) )
+            {
+                printf( "\n" INDENT );
+                line_len = strlen( INDENT );
+            }
+            printf( "%s", pfname );
+            line_len += name_len;
+            if( i+1 < AV_PIX_FMT_NB )
+            {
+                printf( ", " );
+                line_len += 2;
+            }
+        }
+    }
 #endif
-  
-  /* Parse command line */
-  if( parse( argc, argv, &param, &opt ) < 0 )
-    ret = -1;
-  
-#ifdef _WIN32
-  /* Restore title; it can be changed by input modules */
-  SetConsoleTitleW( org_console_title );
-#endif
-  
-  /* Control-C handler */
-  signal( SIGINT, sigint_handler );
-  
-  if( !ret )
-    ret = encode( &param, &opt );
-  
-  /* clean up handles */
-  if( filter.free )
-    filter.free( opt.hin );
-  else if( opt.hin )
-    cli_input.close_file( opt.hin );
-  if( opt.hout )
-    cli_output.close_file( opt.hout, 0, 0 );
-  if( opt.qpfile )
-    fclose( opt.qpfile );
-  
-#ifdef _WIN32
-  SetConsoleTitleW( org_console_title );
-  free( argv );
-#endif
-  
-  return ret;
+    printf( "\n" );
 }
+
 static void help( x264_param_t *defaults, int longhelp )
 {
     char buf[50];
@@ -800,17 +845,19 @@ static void help( x264_param_t *defaults, int longhelp )
         "                                  - %s\n", range_names[0], stringify_names( buf, range_names ) );
     H2( "      --colorprim <string>    Specify color primaries [\"%s\"]\n"
         "                                  - undef, bt709, bt470m, bt470bg, smpte170m,\n"
-        "                                    smpte240m, film, bt2020\n",
+        "                                    smpte240m, film, bt2020, smpte428,\n"
+        "                                    smpte431, smpte432\n",
                                        strtable_lookup( x264_colorprim_names, defaults->vui.i_colorprim ) );
     H2( "      --transfer <string>     Specify transfer characteristics [\"%s\"]\n"
         "                                  - undef, bt709, bt470m, bt470bg, smpte170m,\n"
         "                                    smpte240m, linear, log100, log316,\n"
         "                                    iec61966-2-4, bt1361e, iec61966-2-1,\n"
-        "                                    bt2020-10, bt2020-12\n",
+        "                                    bt2020-10, bt2020-12, smpte2084, smpte428\n",
                                        strtable_lookup( x264_transfer_names, defaults->vui.i_transfer ) );
     H2( "      --colormatrix <string>  Specify color matrix setting [\"%s\"]\n"
         "                                  - undef, bt709, fcc, bt470bg, smpte170m,\n"
-        "                                    smpte240m, GBR, YCgCo, bt2020nc, bt2020c\n",
+        "                                    smpte240m, GBR, YCgCo, bt2020nc, bt2020c,\n"
+        "                                    smpte2085\n",
                                        strtable_lookup( x264_colmatrix_names, defaults->vui.i_colmatrix ) );
     H2( "      --chromaloc <integer>   Specify chroma sample location (0 to 5) [%d]\n",
                                        defaults->vui.i_chroma_loc );
@@ -833,6 +880,7 @@ static void help( x264_param_t *defaults, int longhelp )
         "                                  - %s\n", demuxer_names[0], stringify_names( buf, demuxer_names ) );
     H1( "      --input-fmt <string>    Specify input file format (requires lavf support)\n" );
     H1( "      --input-csp <string>    Specify input colorspace format for raw input\n" );
+    print_csp_names( longhelp );
     H1( "      --output-csp <string>   Specify output colorspace [\"%s\"]\n"
         "                                  - %s\n", output_csp_names[0], stringify_names( buf, output_csp_names ) );
     H1( "      --input-depth <integer> Specify input bit depth for raw input\n" );
@@ -890,6 +938,8 @@ static void help( x264_param_t *defaults, int longhelp )
     H0( "      Filter options may be specified in <filter>:<option>=<value> format.\n" );
     H0( "\n" );
     H0( "      Available filters:\n" );
+    x264_register_vid_filters();
+    x264_vid_filter_help( longhelp );
     H0( "\n" );
 }
 
@@ -913,6 +963,7 @@ typedef enum
     OPT_INDEX,
     OPT_INTERLACED,
     OPT_TCFILE_IN,
+    OPT_TCFILE_OUT,
     OPT_TIMEBASE,
     OPT_PULLDOWN,
     OPT_LOG_LEVEL,
@@ -1073,6 +1124,8 @@ static struct option long_options[] =
     { "colormatrix", required_argument, NULL, 0 },
     { "chromaloc",   required_argument, NULL, 0 },
     { "force-cfr",         no_argument, NULL, 0 },
+    { "tcfile-in",   required_argument, NULL, OPT_TCFILE_IN },
+    { "tcfile-out",  required_argument, NULL, OPT_TCFILE_OUT },
     { "timebase",    required_argument, NULL, OPT_TIMEBASE },
     { "pic-struct",        no_argument, NULL, 0 },
     { "crop-rect",   required_argument, NULL, 0 },
@@ -1129,7 +1182,10 @@ static int select_output( const char *muxer, char *filename, x264_param_t *param
         param->b_repeat_headers = 0;
     }
     else
+    {
         cli_output = raw_output;
+        param->b_repeat_headers = 0;
+    }
     return 0;
 }
 
@@ -1210,6 +1266,66 @@ static int select_input( const char *demuxer, char *used_demuxer, char *filename
     return 0;
 }
 
+static int init_vid_filters( char *sequence, hnd_t *handle, video_info_t *info, x264_param_t *param, int output_csp )
+{
+    x264_register_vid_filters();
+
+    /* intialize baseline filters */
+    if( x264_init_vid_filter( "source", handle, &filter, info, param, NULL ) ) /* wrap demuxer into a filter */
+        return -1;
+    if( x264_init_vid_filter( "resize", handle, &filter, info, param, "normcsp" ) ) /* normalize csps to be of a known/supported format */
+        return -1;
+    if( x264_init_vid_filter( "fix_vfr_pts", handle, &filter, info, param, NULL ) ) /* fix vfr pts */
+        return -1;
+
+    /* parse filter chain */
+    for( char *p = sequence; p && *p; )
+    {
+        int tok_len = strcspn( p, "/" );
+        int p_len = strlen( p );
+        p[tok_len] = 0;
+        int name_len = strcspn( p, ":" );
+        p[name_len] = 0;
+        name_len += name_len != tok_len;
+        if( x264_init_vid_filter( p, handle, &filter, info, param, p + name_len ) )
+            return -1;
+        p += X264_MIN( tok_len+1, p_len );
+    }
+
+    /* force end result resolution */
+    if( !param->i_width && !param->i_height )
+    {
+        param->i_height = info->height;
+        param->i_width  = info->width;
+    }
+    /* force the output csp to what the user specified (or the default) */
+    param->i_csp = info->csp;
+    int csp = info->csp & X264_CSP_MASK;
+    if( output_csp == X264_CSP_I420 && (csp < X264_CSP_I420 || csp >= X264_CSP_I422) )
+        param->i_csp = X264_CSP_I420;
+    else if( output_csp == X264_CSP_I422 && (csp < X264_CSP_I422 || csp >= X264_CSP_I444) )
+        param->i_csp = X264_CSP_I422;
+    else if( output_csp == X264_CSP_I444 && (csp < X264_CSP_I444 || csp >= X264_CSP_BGR) )
+        param->i_csp = X264_CSP_I444;
+    else if( output_csp == X264_CSP_RGB && (csp < X264_CSP_BGR || csp > X264_CSP_RGB) )
+        param->i_csp = X264_CSP_RGB;
+    param->i_csp |= info->csp & X264_CSP_HIGH_DEPTH;
+    /* if the output range is not forced, assign it to the input one now */
+    if( param->vui.b_fullrange == RANGE_AUTO )
+        param->vui.b_fullrange = info->fullrange;
+
+    if( x264_init_vid_filter( "resize", handle, &filter, info, param, NULL ) )
+        return -1;
+
+    char args[20];
+    sprintf( args, "bit_depth=%d", x264_bit_depth );
+
+    if( x264_init_vid_filter( "depth", handle, &filter, info, param, args ) )
+        return -1;
+
+    return 0;
+}
+
 static int parse_enum_name( const char *arg, const char * const *names, const char **dst )
 {
     for( int i = 0; names[i]; i++ )
@@ -1234,9 +1350,11 @@ static int parse_enum_value( const char *arg, const char * const *names, int *ds
 
 static int parse( int argc, char **argv, x264_param_t *param, cli_opt_t *opt )
 {
+    char *input_filename = NULL;
     const char *demuxer = demuxer_names[0];
     char *output_filename = NULL;
     const char *muxer = muxer_names[0];
+    char *tcfile_name = NULL;
     x264_param_t defaults;
     char *profile = NULL;
     char *vid_filters = NULL;
@@ -1373,6 +1491,13 @@ static int parse( int argc, char **argv, x264_param_t *param, cli_opt_t *opt )
             case OPT_INTERLACED:
                 b_user_interlaced = 1;
                 goto generic_option;
+            case OPT_TCFILE_IN:
+                tcfile_name = optarg;
+                break;
+            case OPT_TCFILE_OUT:
+                opt->tcfile_out = x264_fopen( optarg, "wb" );
+                FAIL_IF_ERROR( !opt->tcfile_out, "can't open `%s'\n", optarg )
+                break;
             case OPT_TIMEBASE:
                 input_opt.timebase = optarg;
                 break;
@@ -1418,7 +1543,7 @@ static int parse( int argc, char **argv, x264_param_t *param, cli_opt_t *opt )
             default:
 generic_option:
             {
-                if( long_options_index > 0 )
+                if( long_options_index < 0 )
                 {
                     for( int i = 0; long_options[i].name; i++ )
                         if( long_options[i].val == c )
@@ -1444,9 +1569,7 @@ generic_option:
             return -1;
         }
     }
-    param->i_width = 1280;
-    param->i_height = 720;
-  
+
     /* If first pass mode is used, apply faster settings. */
     if( b_turbo )
         x264_param_apply_fastfirstpass( param );
@@ -1454,7 +1577,16 @@ generic_option:
     /* Apply profile restrictions. */
     if( x264_param_apply_profile( param, profile ) < 0 )
         return -1;
-  
+
+    /* Get the file name */
+    FAIL_IF_ERROR( optind > argc - 1 || !output_filename, "No %s file. Run x264 --help for a list of options.\n",
+                   optind > argc - 1 ? "input" : "output" )
+
+    if( select_output( muxer, output_filename, param ) )
+        return -1;
+    FAIL_IF_ERROR( cli_output.open_file( output_filename, &opt->hout, &output_opt ), "could not open output file `%s'\n", output_filename )
+
+    input_filename = argv[optind++];
     video_info_t info = {0};
     char demuxername[5];
 
@@ -1471,16 +1603,44 @@ generic_option:
     }
     info.tff        = param->b_tff;
     info.vfr        = param->b_vfr_input;
-    info.width = 1280;
-    info.height = 720;
+
     input_opt.seek = opt->i_seek;
     input_opt.progress = opt->b_progress;
     input_opt.output_csp = output_csp;
 
+    if( select_input( demuxer, demuxername, input_filename, &opt->hin, &info, &input_opt ) )
+        return -1;
+
+    FAIL_IF_ERROR( !opt->hin && cli_input.open_file( input_filename, &opt->hin, &info, &input_opt ),
+                   "could not open input file `%s'\n", input_filename )
+
+    x264_reduce_fraction( &info.sar_width, &info.sar_height );
+    x264_reduce_fraction( &info.fps_num, &info.fps_den );
     x264_cli_log( demuxername, X264_LOG_INFO, "%dx%d%c %u:%u @ %u/%u fps (%cfr)\n", info.width,
                   info.height, info.interlaced ? 'i' : 'p', info.sar_width, info.sar_height,
                   info.fps_num, info.fps_den, info.vfr ? 'v' : 'c' );
 
+    if( tcfile_name )
+    {
+        FAIL_IF_ERROR( b_user_fps, "--fps + --tcfile-in is incompatible.\n" )
+        FAIL_IF_ERROR( timecode_input.open_file( tcfile_name, &opt->hin, &info, &input_opt ), "timecode input failed\n" )
+        cli_input = timecode_input;
+    }
+    else FAIL_IF_ERROR( !info.vfr && input_opt.timebase, "--timebase is incompatible with cfr input\n" )
+
+    /* init threaded input while the information about the input video is unaltered by filtering */
+#if HAVE_THREAD
+    if( info.thread_safe && (b_thread_input || param->i_threads > 1
+        || (param->i_threads == X264_THREADS_AUTO && x264_cpu_num_processors() > 1)) )
+    {
+        if( thread_input.open_file( NULL, &opt->hin, &info, NULL ) )
+        {
+            fprintf( stderr, "x264 [error]: threaded input failed\n" );
+            return -1;
+        }
+        cli_input = thread_input;
+    }
+#endif
 
     /* override detected values by those specified by the user */
     if( param->vui.i_sar_width > 0 && param->vui.i_sar_height > 0 )
@@ -1498,7 +1658,6 @@ generic_option:
         info.timebase_num = info.fps_den;
         info.timebase_den = info.fps_num;
     }
-    char *tcfile_name = NULL;
     if( !tcfile_name && input_opt.timebase )
     {
         uint64_t i_user_timebase_num;
@@ -1526,8 +1685,8 @@ generic_option:
     if( input_opt.input_range != RANGE_AUTO )
         info.fullrange = input_opt.input_range;
 
-    //if( init_vid_filters( vid_filters, &opt->hin, &info, param, output_csp ) )
-    //    return -1;
+    if( init_vid_filters( vid_filters, &opt->hin, &info, param, output_csp ) )
+        return -1;
 
     /* set param flags from the post-filtered video */
     param->b_vfr_input = info.vfr;
@@ -1538,7 +1697,7 @@ generic_option:
     param->vui.i_sar_width  = info.sar_width;
     param->vui.i_sar_height = info.sar_height;
 
-    info.num_frames = X264_MAX( info.num_frames - opt->i_seek, 30);
+    info.num_frames = X264_MAX( info.num_frames - opt->i_seek, 0 );
     if( (!info.num_frames || param->i_frame_total < info.num_frames)
         && param->i_frame_total > 0 )
         info.num_frames = param->i_frame_total;
@@ -1586,19 +1745,23 @@ generic_option:
 
 static void parse_qpfile( cli_opt_t *opt, x264_picture_t *pic, int i_frame )
 {
-    int num = -1, qp, ret;
+    int num = -1;
     char type;
-    uint64_t file_pos;
     while( num < i_frame )
     {
-        file_pos = ftell( opt->qpfile );
-        qp = -1;
-        ret = fscanf( opt->qpfile, "%d %c%*[ \t]%d\n", &num, &type, &qp );
+        int64_t file_pos = ftell( opt->qpfile );
+        int qp = -1;
+        int ret = fscanf( opt->qpfile, "%d %c%*[ \t]%d\n", &num, &type, &qp );
         pic->i_type = X264_TYPE_AUTO;
         pic->i_qpplus1 = X264_QP_AUTO;
         if( num > i_frame || ret == EOF )
         {
-            fseek( opt->qpfile, file_pos, SEEK_SET );
+            if( file_pos < 0 || fseek( opt->qpfile, file_pos, SEEK_SET ) )
+            {
+                x264_cli_log( "x264", X264_LOG_ERROR, "qpfile seeking failed\n" );
+                fclose( opt->qpfile );
+                opt->qpfile = NULL;
+            }
             break;
         }
         if( num < i_frame && ret >= 2 )
@@ -1640,6 +1803,34 @@ static int encode_frame( x264_t *h, hnd_t hout, x264_picture_t *pic, int64_t *la
     }
 
     return i_frame_size;
+}
+
+static int64_t print_status( int64_t i_start, int64_t i_previous, int i_frame, int i_frame_total, int64_t i_file, x264_param_t *param, int64_t last_ts )
+{
+    char buf[200];
+    int64_t i_time = x264_mdate();
+    if( i_previous && i_time - i_previous < UPDATE_INTERVAL )
+        return i_previous;
+    int64_t i_elapsed = i_time - i_start;
+    double fps = i_elapsed > 0 ? i_frame * 1000000. / i_elapsed : 0;
+    double bitrate;
+    if( last_ts )
+        bitrate = (double) i_file * 8 / ( (double) last_ts * 1000 * param->i_timebase_num / param->i_timebase_den );
+    else
+        bitrate = (double) i_file * 8 / ( (double) 1000 * param->i_fps_den / param->i_fps_num );
+    if( i_frame_total )
+    {
+        int eta = i_elapsed * (i_frame_total - i_frame) / ((int64_t)i_frame * 1000000);
+        sprintf( buf, "x264 [%.1f%%] %d/%d frames, %.2f fps, %.2f kb/s, eta %d:%02d:%02d",
+                 100. * i_frame / i_frame_total, i_frame, i_frame_total, fps, bitrate,
+                 eta/3600, (eta/60)%60, eta%60 );
+    }
+    else
+        sprintf( buf, "x264 %d frames: %.2f fps, %.2f kb/s", i_frame, fps, bitrate );
+    fprintf( stderr, "%s  \r", buf+5 );
+    x264_cli_set_console_title( buf );
+    fflush( stderr ); // needed in windows
+    return i_time;
 }
 
 static void convert_cli_to_lib_pic( x264_picture_t *lib, cli_pic_t *cli )
@@ -1702,9 +1893,9 @@ static int encode( x264_param_t *param, cli_opt_t *opt )
 
     x264_encoder_parameters( h, param );
 
-    //FAIL_IF_ERROR2( cli_output.set_param( opt->hout, param ), "can't set outfile param\n" );
+    FAIL_IF_ERROR2( cli_output.set_param( opt->hout, param ), "can't set outfile param\n" );
 
-    i_start = 0;
+    i_start = x264_mdate();
 
     /* ticks/frame = ticks/second / frames/second */
     ticks_per_frame = (int64_t)param->i_timebase_den * param->i_fps_den / param->i_timebase_num / param->i_fps_num;
@@ -1720,19 +1911,18 @@ static int encode( x264_param_t *param, cli_opt_t *opt )
         FAIL_IF_ERROR2( x264_encoder_headers( h, &headers, &i_nal ) < 0, "x264_encoder_headers failed\n" )
         FAIL_IF_ERROR2( (i_file = cli_output.write_headers( opt->hout, headers )) < 0, "error writing headers to output file\n" );
     }
-    FILE *pFileYUV = fopen ("/Users/longquanchen/Desktop/Github/openh264-master/res/Cisco_Absolute_Power_1280x720_30fps.yuv", "rb");
-    FILE *pFile264 = fopen("local.h264", "w");
 
-    x264_picture_alloc( &pic, param->i_csp, param->i_width, param->i_height );
+    if( opt->tcfile_out )
+        fprintf( opt->tcfile_out, "# timecode format v2\n" );
+
+    /* Encode frames */
     for( ; !b_ctrl_c && (i_frame < param->i_frame_total || !param->i_frame_total); i_frame++ )
     {
-        if( fread( pic.img.plane[0], 1, param->i_width*param->i_height, pFileYUV ) != param->i_width*param->i_height )
-          break;
-        if( fread( pic.img.plane[1], 1, param->i_width*param->i_height/4, pFileYUV ) != param->i_width*param->i_height/4 )
-          break;
-        if( fread( pic.img.plane[2], 1, param->i_width*param->i_height/4, pFileYUV ) != param->i_width*param->i_height/4 )
-          break;
-      
+        if( filter.get_frame( opt->hin, &cli_pic, i_frame + opt->i_seek ) )
+            break;
+        x264_picture_init( &pic );
+        convert_cli_to_lib_pic( &pic, &cli_pic );
+
         if( !param->b_vfr_input )
             pic.i_pts = i_frame;
 
@@ -1758,12 +1948,14 @@ static int encode( x264_param_t *param, cli_opt_t *opt )
 
         second_largest_pts = largest_pts;
         largest_pts = pic.i_pts;
+        if( opt->tcfile_out )
+            fprintf( opt->tcfile_out, "%.6f\n", pic.i_pts * ((double)param->i_timebase_num / param->i_timebase_den) * 1e3 );
+
         if( opt->qpfile )
             parse_qpfile( opt, &pic, i_frame + opt->i_seek );
 
         prev_dts = last_dts;
         i_frame_size = encode_frame( h, opt->hout, &pic, &last_dts );
-        fprintf( stderr, "frameSize: %d \n", i_frame_size);
         if( i_frame_size < 0 )
         {
             b_ctrl_c = 1; /* lie to exit the loop */
@@ -1777,6 +1969,12 @@ static int encode( x264_param_t *param, cli_opt_t *opt )
                 first_dts = prev_dts = last_dts;
         }
 
+        if( filter.release_frame( opt->hin, &cli_pic, i_frame + opt->i_seek ) )
+            break;
+
+        /* update status line (up to 1000 times per input file) */
+        if( opt->b_progress && i_frame_output )
+            i_previous = print_status( i_start, i_previous, i_frame_output, param->i_frame_total, i_file, param, 2 * last_dts - prev_dts - first_dts );
     }
     /* Flush delayed frames */
     while( !b_ctrl_c && x264_encoder_delayed_frames( h ) )
@@ -1795,6 +1993,8 @@ static int encode( x264_param_t *param, cli_opt_t *opt )
             if( i_frame_output == 1 )
                 first_dts = prev_dts = last_dts;
         }
+        if( opt->b_progress && i_frame_output )
+            i_previous = print_status( i_start, i_previous, i_frame_output, param->i_frame_total, i_file, param, 2 * last_dts - prev_dts - first_dts );
     }
 fail:
     if( pts_warning_cnt >= MAX_PTS_WARNING && cli_log_level < X264_LOG_DEBUG )
@@ -1808,7 +2008,7 @@ fail:
     else
         duration = (double)(2 * largest_pts - second_largest_pts) * param->i_timebase_num / param->i_timebase_den;
 
-  i_end = 1;
+    i_end = x264_mdate();
     /* Erase progress indicator before printing encoding stats. */
     if( opt->b_progress )
         fprintf( stderr, "                                                                               \r" );
@@ -1819,7 +2019,7 @@ fail:
     if( b_ctrl_c )
         fprintf( stderr, "aborted at input frame %d, output frame %d\n", opt->i_seek + i_frame, i_frame_output );
 
-    //cli_output.close_file( opt->hout, largest_pts, second_largest_pts );
+    cli_output.close_file( opt->hout, largest_pts, second_largest_pts );
     opt->hout = NULL;
 
     if( i_frame_output > 0 )
