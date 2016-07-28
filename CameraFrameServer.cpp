@@ -1355,7 +1355,7 @@ int main(int argc, char* argv[])
   cap.open(0);
   //CalculateFrameRate(cap);
   //Test the encoder
-  td.interval = 1;
+  /*td.interval = 1;
   td.glock    = glock;
   td.socket   = NULL;
   td.stop     = 0;
@@ -1365,7 +1365,7 @@ int main(int argc, char* argv[])
   while(1);
   {
     igtl::Sleep(10000);
-  }
+  }*/
   
   while(1){
     //------------------------------------------------------------
@@ -1539,7 +1539,7 @@ void* ThreadFunction(void* ptr)
   // NOTE: TrackingDataElement class instances are allocated
   //       before the loop starts to avoid reallocation
   //       in each image transfer.
-  int picWidth = 1024, picHeight = 720;
+  int picWidth = 1280, picHeight = 720;
   x264_param_t param;
   x264_picture_t pic;
   x264_picture_alloc(&pic, X264_CSP_BGR, picWidth, picHeight);
@@ -1563,8 +1563,8 @@ void* ThreadFunction(void* ptr)
     int argc = 2;
     char *argv[2] = {"--qp=0","--crf=24"};
     
-    //pic.img.i_plane = 3;
-    //pic.img.i_stride[0] = pic.img.i_stride[1] = pic.img.i_stride[2] = picWidth;
+    pic.img.i_plane = 3;
+    pic.img.i_stride[0] = pic.img.i_stride[1] = pic.img.i_stride[2] = picWidth;
     const cli_pulldown_t *pulldown = NULL; // shut up gcc
     
     int     i_frame = 0;
@@ -1651,7 +1651,6 @@ void* ThreadFunction(void* ptr)
           if( opt.qpfile )
             parse_qpfile( &opt, &pic, i_frame + opt.i_seek );
           
-          
           int i_frame_size = 0;
           i_frame_size = x264_encoder_encode( h, &nal, &i_nal, &pic, &pic_out );
           
@@ -1664,7 +1663,7 @@ void* ThreadFunction(void* ptr)
             //---------------
             igtl::VideoMessage::Pointer videoMsg;
             videoMsg = igtl::VideoMessage::New();
-            videoMsg->SetDeviceName("Video");
+            videoMsg->SetDeviceName("ColorFrame");
             videoMsg->SetBitStreamSize(i_frame_size);
             videoMsg->AllocateScalars();
             videoMsg->SetScalarType(videoMsg->TYPE_UINT32);
