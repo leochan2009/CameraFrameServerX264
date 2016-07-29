@@ -14,16 +14,17 @@
 #include "igtlServerSocket.h"
 #include "igtlMultiThreader.h"
 extern "C" {
-#include "stdint.h"
-#include "x264.h"
-#include "x264cli.h"
+  #include "stdint.h"
+  #include "x264.h"
+  #include "x264cli.h"
+
+  #include <signal.h>
+  #include <getopt.h>
+  #include "common/common.h"
+  #include "input/input.h"
+  #include "output/output.h"
+  #include "filters/filters.h"
 }
-#include <signal.h>
-#include <getopt.h>
-#include "common/common.h"
-#include "input/input.h"
-#include "output/output.h"
-#include "filters/filters.h"
 #define FAIL_IF_ERROR( cond, ... ) FAIL_IF_ERR( cond, "x264", __VA_ARGS__ )
 
 
@@ -1116,7 +1117,7 @@ static int parse( int argc, char **argv, x264_param_t *param, cli_opt_t *opt )
       default:
       generic_option:
       {
-        if( long_options_index > 0 )
+        if( long_options_index < 0 )
         {
           for( int i = 0; long_options[i].name; i++ )
             if( long_options[i].val == c )
@@ -1339,15 +1340,7 @@ int main(int argc, char* argv[])
   
   int    port     = atoi(argv[1]);
   
-  igtl::ServerSocket::Pointer serverSocket;
-  serverSocket = igtl::ServerSocket::New();
-  int r = serverSocket->CreateServer(port);
-  
-  if (r < 0)
-  {
-    std::cerr << "Cannot create a server socket." << std::endl;
-    exit(0);
-  }
+
   igtl::MultiThreader::Pointer threader = igtl::MultiThreader::New();
   igtl::MutexLock::Pointer glock = igtl::MutexLock::New();
   ThreadData td;
@@ -1355,7 +1348,7 @@ int main(int argc, char* argv[])
   cap.open(0);
   //CalculateFrameRate(cap);
   //Test the encoder
-  /*td.interval = 1;
+  td.interval = 1;
   td.glock    = glock;
   td.socket   = NULL;
   td.stop     = 0;
@@ -1365,8 +1358,17 @@ int main(int argc, char* argv[])
   while(1);
   {
     igtl::Sleep(10000);
-  }*/
+  }
   
+  igtl::ServerSocket::Pointer serverSocket;
+  serverSocket = igtl::ServerSocket::New();
+  int r = serverSocket->CreateServer(port);
+  
+  if (r < 0)
+  {
+    std::cerr << "Cannot create a server socket." << std::endl;
+    exit(0);
+  }
   while(1){
     //------------------------------------------------------------
     // Waiting for Connection
@@ -1550,142 +1552,150 @@ void* ThreadFunction(void* ptr)
   cli_opt_t opt;
   x264_t *h = NULL;
   
-  param.i_csp = X264_CSP_BGR;
+  
   param.i_width  = picWidth;
   param.i_height = picHeight;
   param.b_vfr_input = 0;
   param.b_repeat_headers = 1;
   param.b_annexb = 1;
   x264_param_apply_profile( &param, "high444" );
-  h = x264_encoder_open( &param );
-  if (h != NULL)
-  {
-    int argc = 2;
-    char *argv[2] = {"--qp=0","--crf=24"};
-    
-    pic.img.i_plane = 3;
-    pic.img.i_stride[0] = pic.img.i_stride[1] = pic.img.i_stride[2] = picWidth;
-    const cli_pulldown_t *pulldown = NULL; // shut up gcc
-    
-    int     i_frame = 0;
-    int64_t last_dts = 0;
+  int argc = 7;
+  char *argv[7] = {"","--qp","0","--crf","24", "--tune", "zerolatency"};
+  
+  pic.img.i_plane = 3;
+  pic.img.i_stride[0] = pic.img.i_stride[1] = pic.img.i_stride[2] = picWidth;
+  const cli_pulldown_t *pulldown = NULL; // shut up gcc
+  
+  int     i_frame = 0;
+  int64_t last_dts = 0;
 #   define  MAX_PTS_WARNING 3 /* arbitrary */
-    int     pts_warning_cnt = 0;
-    int64_t largest_pts = -1;
-    int64_t second_largest_pts = -1;
-    int64_t ticks_per_frame;
-    double  pulldown_pts = 0;
-    
-    opt.b_progress &= param.i_log_level < X264_LOG_DEBUG;
-    
-    /* set up pulldown */
-    if( opt.i_pulldown && !param.b_vfr_input )
-    {
-      param.b_pulldown = 1;
-      param.b_pic_struct = 1;
-      pulldown = &pulldown_values[opt.i_pulldown];
-      param.i_timebase_num = param.i_fps_den;
-      param.i_timebase_den = param.i_fps_num * pulldown->fps_factor;
-    }
+  int     pts_warning_cnt = 0;
+  int64_t largest_pts = -1;
+  int64_t second_largest_pts = -1;
+  int64_t ticks_per_frame;
+  double  pulldown_pts = 0;
+  
+  opt.b_progress &= param.i_log_level < X264_LOG_DEBUG;
+  
+  /* set up pulldown */
+  if( opt.i_pulldown && !param.b_vfr_input )
+  {
+    param.b_pulldown = 1;
+    param.b_pic_struct = 1;
+    pulldown = &pulldown_values[opt.i_pulldown];
+    param.i_timebase_num = param.i_fps_den;
+    param.i_timebase_den = param.i_fps_num * pulldown->fps_factor;
+  }
 
-    parse( argc, argv, &param, &opt ) ;
-    
-    x264_encoder_parameters( h, &param );
-    
-    /* ticks/frame = ticks/second / frames/second */
-    ticks_per_frame = (int64_t)param.i_timebase_den * param.i_fps_den / param.i_timebase_num / param.i_fps_num;
-    ticks_per_frame = X264_MAX( ticks_per_frame, 1 );
-    
-    if (td->cap.isOpened())
+  parse( argc, argv, &param, &opt ) ;
+  param.rc.i_rc_method = 0;
+  param.i_csp = X264_CSP_BGR;
+  h = x264_encoder_open( &param );
+  x264_encoder_parameters( h, &param );
+  
+  /* ticks/frame = ticks/second / frames/second */
+  ticks_per_frame = (int64_t)param.i_timebase_den * param.i_fps_den / param.i_timebase_num / param.i_fps_num;
+  ticks_per_frame = X264_MAX( ticks_per_frame, 1 );
+  FILE * pOut = fopen("localOut.264","a");
+  int frameNum = 0;
+  if (td->cap.isOpened())
+  {
+    while (!td->stop)
     {
-      while (!td->stop)
+      cv::Mat frame;
+      td->cap >> frame;
+      if(frame.empty()){
+        std::cerr<<"frame is empty"<<std::endl;
+        break;
+      }
+      cv::imshow("", frame);
+      cv::waitKey(10);
+      if (!td->useCompression)
       {
-        cv::Mat frame;
-        td->cap >> frame;
-        if(frame.empty()){
-          std::cerr<<"frame is empty"<<std::endl;
-          break;
-        }
-        cv::imshow("", frame);
-        cv::waitKey(10);
-        if (!td->useCompression)
+        cv::Mat rgbImg;
+        cv::cvtColor(frame, rgbImg, CV_BGR2RGB);
+        igtl::VideoMessage::Pointer videoMsg;
+        videoMsg = igtl::VideoMessage::New();
+        videoMsg->SetDeviceName("Video");
+        videoMsg->SetBitStreamSize(picWidth*picHeight*3);
+        videoMsg->AllocateScalars();
+        videoMsg->SetScalarType(videoMsg->TYPE_UINT32);
+        videoMsg->SetEndian(igtl_is_little_endian()==true?2:1); //little endian is 2 big endian is 1
+        videoMsg->SetWidth(picWidth);
+        videoMsg->SetHeight(picHeight);
+        memcpy(videoMsg->GetPackFragmentPointer(2), rgbImg.data, picWidth*picHeight*3);
+        videoMsg->Pack();
+        glock->Lock();
+        for (int i = 0; i < videoMsg->GetNumberOfPackFragments(); i ++)
         {
-          cv::Mat rgbImg;
-          cv::cvtColor(frame, rgbImg, CV_BGR2RGB);
+          socket->Send(videoMsg->GetPackFragmentPointer(i), videoMsg->GetPackFragmentSize(i));
+        }
+        glock->Unlock();
+        igtl::Sleep(interval);
+      }
+      else{
+        pic.i_pts = i_frame;
+        pic.img.plane[0] = frame.data;
+        pic.img.plane[1] = pic.img.plane[0] + picWidth*picHeight;
+        pic.img.plane[2] = pic.img.plane[1] + picWidth*picHeight;
+        if( !param.b_vfr_input )
+          pic.i_pts = i_frame;
+        
+        if( opt.i_pulldown && !param.b_vfr_input )
+        {
+          pic.i_pic_struct = pulldown->pattern[ i_frame % pulldown->mod ];
+          pic.i_pts = (int64_t)( pulldown_pts + 0.5 );
+          pulldown_pts += pulldown_frame_duration[pic.i_pic_struct];
+        }
+        else if( opt.timebase_convert_multiplier )
+          pic.i_pts = (int64_t)( pic.i_pts * opt.timebase_convert_multiplier + 0.5 );
+        
+        if( opt.qpfile )
+          parse_qpfile( &opt, &pic, i_frame + opt.i_seek );
+        
+        int i_frame_size = 0;
+        i_frame_size = x264_encoder_encode( h, &nal, &i_nal, &pic, &pic_out );
+        
+        i_frame++;
+        if(i_frame_size > 0 && frameNum <10)
+        {
+          last_dts = pic_out.i_dts;
+          /*
+          // 1. contain SHA encryption, could be removed, 2. contain the digest message could be as CRC
+          //UpdateHashFromFrame (info, &ctx);
+          //---------------
           igtl::VideoMessage::Pointer videoMsg;
           videoMsg = igtl::VideoMessage::New();
-          videoMsg->SetDeviceName("Video");
-          videoMsg->SetBitStreamSize(picWidth*picHeight*3);
+          videoMsg->SetDeviceName("ColorFrame");
+          videoMsg->SetBitStreamSize(i_frame_size);
           videoMsg->AllocateScalars();
           videoMsg->SetScalarType(videoMsg->TYPE_UINT32);
           videoMsg->SetEndian(igtl_is_little_endian()==true?2:1); //little endian is 2 big endian is 1
           videoMsg->SetWidth(picWidth);
           videoMsg->SetHeight(picHeight);
-          memcpy(videoMsg->GetPackFragmentPointer(2), rgbImg.data, picWidth*picHeight*3);
+          memcpy(videoMsg->GetPackFragmentPointer(2),(nal[0].p_payload), i_frame_size);
           videoMsg->Pack();
           glock->Lock();
+          
           for (int i = 0; i < videoMsg->GetNumberOfPackFragments(); i ++)
           {
             socket->Send(videoMsg->GetPackFragmentPointer(i), videoMsg->GetPackFragmentSize(i));
           }
-          glock->Unlock();
+          glock->Unlock();*/
+          
+          fwrite(nal[0].p_payload, 1, i_frame_size , pOut);
+          frameNum++;
           igtl::Sleep(interval);
         }
-        else{
-          pic.i_pts = i_frame;
-          pic.img.plane[0] = frame.data;
-          pic.img.plane[1] = pic.img.plane[0] + picWidth*picHeight;
-          pic.img.plane[2] = pic.img.plane[1] + picWidth*picHeight;
-          if( !param.b_vfr_input )
-            pic.i_pts = i_frame;
-          
-          if( opt.i_pulldown && !param.b_vfr_input )
-          {
-            pic.i_pic_struct = pulldown->pattern[ i_frame % pulldown->mod ];
-            pic.i_pts = (int64_t)( pulldown_pts + 0.5 );
-            pulldown_pts += pulldown_frame_duration[pic.i_pic_struct];
-          }
-          else if( opt.timebase_convert_multiplier )
-            pic.i_pts = (int64_t)( pic.i_pts * opt.timebase_convert_multiplier + 0.5 );
-          
-          if( opt.qpfile )
-            parse_qpfile( &opt, &pic, i_frame + opt.i_seek );
-          
-          int i_frame_size = 0;
-          i_frame_size = x264_encoder_encode( h, &nal, &i_nal, &pic, &pic_out );
-          
-          i_frame++;
-          if(i_frame_size > 0)
-          {
-            last_dts = pic_out.i_dts;
-            // 1. contain SHA encryption, could be removed, 2. contain the digest message could be as CRC
-            //UpdateHashFromFrame (info, &ctx);
-            //---------------
-            igtl::VideoMessage::Pointer videoMsg;
-            videoMsg = igtl::VideoMessage::New();
-            videoMsg->SetDeviceName("ColorFrame");
-            videoMsg->SetBitStreamSize(i_frame_size);
-            videoMsg->AllocateScalars();
-            videoMsg->SetScalarType(videoMsg->TYPE_UINT32);
-            videoMsg->SetEndian(igtl_is_little_endian()==true?2:1); //little endian is 2 big endian is 1
-            videoMsg->SetWidth(picWidth);
-            videoMsg->SetHeight(picHeight);
-            memcpy(videoMsg->GetPackFragmentPointer(2),(nal[0].p_payload), i_frame_size);
-            videoMsg->Pack();
-            glock->Lock();
-            
-            for (int i = 0; i < videoMsg->GetNumberOfPackFragments(); i ++)
-            {
-              socket->Send(videoMsg->GetPackFragmentPointer(i), videoMsg->GetPackFragmentSize(i));
-            }
-            glock->Unlock();
-            igtl::Sleep(interval);
-          }
+        else if (frameNum >=10)
+        {
+          break;
         }
       }
     }
-    x264_encoder_close( h );
   }
+  fclose(pOut);
+  x264_encoder_close( h );
   return NULL;
 }
 

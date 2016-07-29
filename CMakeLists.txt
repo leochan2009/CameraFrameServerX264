@@ -24,7 +24,7 @@ include_directories("${XH264_INCLUDE}/encoder")
 
 add_executable( localX264 x264Local.c)
 
-SET(SRCX264 x264.c
+SET(SRCX264 x264.cpp
   "${XH264_INCLUDE}/input/input.c"
   "${XH264_INCLUDE}/input/timecode.c"
   "${XH264_INCLUDE}/input/raw.c"
