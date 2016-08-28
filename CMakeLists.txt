@@ -5,8 +5,9 @@ find_package( OpenCV )
 include_directories("${OpenCV_INCLUDE_DIRS}")
 
 get_filename_component(PARENT_DIR ${CMAKE_SOURCE_DIR} DIRECTORY)
+get_filename_component(PARENT_DIR ${PARENT_DIR} DIRECTORY)
 set(XH264_INCLUDE "${PARENT_DIR}/x264" CACHE STRING "X264 source and library file")
-
+message(${XH264_INCLUDE})
 include_directories("${XH264_INCLUDE}")
 LINK_DIRECTORIES("${XH264_INCLUDE}")
 
